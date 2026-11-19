@@ -1,0 +1,38 @@
+# Secrets : jamais dans le dépôt (risque R29)
+secrets/
+*.pem
+*.key
+.env
+.env.*
+
+# Environnements et caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+dist/
+build/
+*.egg-info/
+coverage/
+.coverage
+
+# Sauvegardes chiffrées (copiées hors site, jamais versionnées)
+sauvegardes/
+# Résultats des analyses de sécurité locales
+rapports/
+mobile/android/
+mobile/ios/
+mobile/.expo/
+
+# Hors dépôt public : configuration d'assistant, documentation interne, fichiers générés localement
+**/.claude/
+docs/
+mobile/AGENTS.md
+mobile/empreintes_tls.json
+mobile/.expo-shared/
+**/.pytest_cache/
+web/dist/
+*.zip
+*.log
+mobile/LICENSE

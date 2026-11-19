@@ -1,0 +1,49 @@
+{
+  "expo": {
+    "name": "Scolaris",
+    "slug": "scolaris",
+    "scheme": "scolaris",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "cm.univexemple.scolaris"
+    },
+    "android": {
+      "package": "cm.univexemple.scolaris",
+      "adaptiveIcon": {
+        "backgroundColor": "#2F231B",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "allowBackup": false,
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true
+        }
+      ],
+      "expo-font",
+      [
+        "expo-notifications",
+        {
+          "color": "#6B4A33"
+        }
+      ],
+      "./plugins/certificat-dev"
+    ],
+    "experiments": {
+      "typedRoutes": false
+    },
+    "extra": {
+      "apiUrl": "https://localhost:9443/api/v1"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+# Recherche de secrets (risque R29) : règles par défaut de gitleaks.
+# Les dossiers exclus sont des dépendances téléchargées ou des dossiers listés
+# dans .gitignore (jamais versionnés) ; ils ne comptent que pour l'analyse locale d'un dossier.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Dépendances tierces et fichiers non versionnés"
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)\.venv/''',
+  '''(^|/)secrets/''',
+  '''(^|/)sauvegardes/''',
+  '''(^|/)rapports/''',
+  '''(^|/)dist/''',
+  '''^mobile/(android|ios|\.expo)/''',
+]

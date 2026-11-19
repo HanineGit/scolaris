@@ -1,0 +1,276 @@
+# Scolaris – déploiement complet en une commande :
+#   python scripts/generer_secrets.py
+#   docker compose up -d --build
+#
+# Zones de confiance :
+#   - dmz     : la passerelle, seule exposée (ports 9443/9080 sur le poste) ;
+#   - interne : services, bases et bus, réseau non routable vers l'extérieur ;
+#   - outils  : Mailpit (développement uniquement), accessible en local.
+# Tous les flux sont chiffrés : HTTPS (TLS 1.3) en entrée, TLS vers PostgreSQL,
+# AMQPS vers RabbitMQ, avec vérification des certificats par l'AC interne.
+
+name: scolaris
+
+x-service: &service
+  build: { context: ., dockerfile: services/Dockerfile }
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  networks: [interne]
+  environment: &env
+    ENVIRONNEMENT: ${ENVIRONNEMENT:-developpement}
+    NIVEAU_LOG: INFO
+    URL_AUTH: http://auth:8000
+
+x-migration: &migration
+  build: { context: ., dockerfile: services/Dockerfile }
+  restart: "no"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  networks: [interne]
+  depends_on:
+    postgres: { condition: service_healthy }
+
+services:
+  postgres:
+    image: postgres:14  # image déjà présente localement
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_postgres_admin_password
+    # La clé TLS est recopiée avec les droits exigés par PostgreSQL (lecture par son seul propriétaire).
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        install -o postgres -g postgres -m 600 /run/secrets/postgres_tls_key /var/lib/postgresql/serveur.key
+        install -o postgres -g postgres -m 644 /run/secrets/postgres_tls_cert /var/lib/postgresql/serveur.crt
+        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_min_protocol_version=TLSv1.3 -c max_connections=200 \
+          -c ssl_cert_file=/var/lib/postgresql/serveur.crt -c ssl_key_file=/var/lib/postgresql/serveur.key \
+          -c hba_file=/etc/postgresql/pg_hba.conf -c password_encryption=scram-sha-256
+    secrets: [pg_postgres_admin_password, pg_migration_password, pg_svc_auth_password, pg_svc_etudiant_password,
+              pg_svc_notes_rw_password, pg_svc_notes_ro_password, pg_svc_audit_password, pg_svc_notifications_password,
+              postgres_tls_cert, postgres_tls_key]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init.sh:/docker-entrypoint-initdb.d/10-init.sh:ro
+      - ./infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    networks: [interne]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3.13-alpine
+    restart: unless-stopped
+    # Le mot de passe et les certificats sont lus depuis les secrets au démarrage.
+    # Seul le port AMQPS (5671) est ouvert ; le port AMQP en clair est désactivé.
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        mkdir -p /etc/rabbitmq/tls
+        install -o rabbitmq -g rabbitmq -m 600 /run/secrets/rabbitmq_tls_key /etc/rabbitmq/tls/serveur.key
+        install -o rabbitmq -g rabbitmq -m 644 /run/secrets/rabbitmq_tls_cert /etc/rabbitmq/tls/serveur.crt
+        install -o rabbitmq -g rabbitmq -m 644 /run/secrets/ca_cert /etc/rabbitmq/tls/ca.crt
+        cat > /etc/rabbitmq/conf.d/90-scolaris.conf <<CONF
+        default_user = scolaris
+        default_pass = $$(cat /run/secrets/rabbitmq_password)
+        listeners.tcp = none
+        listeners.ssl.default = 5671
+        ssl_options.cacertfile = /etc/rabbitmq/tls/ca.crt
+        ssl_options.certfile = /etc/rabbitmq/tls/serveur.crt
+        ssl_options.keyfile = /etc/rabbitmq/tls/serveur.key
+        ssl_options.verify = verify_none
+        ssl_options.versions.1 = tlsv1.3
+        ssl_options.versions.2 = tlsv1.2
+        CONF
+        exec docker-entrypoint.sh rabbitmq-server
+    secrets: [rabbitmq_password, rabbitmq_tls_cert, rabbitmq_tls_key, ca_cert]
+    volumes: [rabbitdata:/var/lib/rabbitmq]
+    networks: [interne]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_listener", "5671"]
+      interval: 10s
+      retries: 20
+
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    networks: [interne, outils]
+    ports: ["127.0.0.1:${MAILPIT_PORT:-8026}:8025"]   # boîte de réception de développement, accessible en local uniquement
+
+  # --- Migrations : compte « scolaris_migration », exécutées avant chaque service ---
+  auth-migration:
+    <<: *migration
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: auth } }
+    image: scolaris-auth
+    command: ["python", "-m", "app.migrate"]
+    environment:
+      ADMIN_INITIAL_EMAIL: ${ADMIN_INITIAL_EMAIL:-admin@univ-exemple.cm}
+      URL_ACTIVATION: https://localhost:${PORT_HTTPS:-9443}/activation
+      SMTP_HOTE: mailpit
+      SMTP_PORT: "1025"
+    secrets: [auth_db_url_migration, ca_cert]
+    depends_on:
+      postgres: { condition: service_healthy }
+      mailpit: { condition: service_started }
+
+  etudiants-migration:
+    <<: *migration
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: etudiants } }
+    image: scolaris-etudiants
+    command: ["python", "-m", "app.migrate"]
+    secrets: [etudiant_db_url_migration, ca_cert]
+
+  notes-migration:
+    <<: *migration
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: notes } }
+    image: scolaris-notes
+    command: ["python", "-m", "app.migrate"]
+    secrets: [notes_db_url_migration, ca_cert]
+
+  audit-migration:
+    <<: *migration
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: audit } }
+    image: scolaris-audit
+    command: ["python", "-m", "app.migrate"]
+    secrets: [audit_db_url_migration, ca_cert]
+
+  notifications-migration:
+    <<: *migration
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: notifications } }
+    image: scolaris-notifications
+    command: ["python", "-m", "app.migrate"]
+    secrets: [notifications_db_url_migration, ca_cert]
+
+  # --- Microservices : chacun ne reçoit que ses propres secrets ---
+  auth:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: auth } }
+    image: scolaris-auth
+    environment:
+      <<: *env
+      WEB_CONCURRENCY: "4"   # processus uvicorn : le hachage Argon2 est volontairement coûteux
+      URL_ACTIVATION: https://localhost:${PORT_HTTPS:-9443}/activation
+      SMTP_HOTE: mailpit
+      SMTP_PORT: "1025"
+    secrets: [auth_db_url, jwt_private_key, jwt_public_key, mfa_encryption_key, rabbitmq_url, ca_cert,
+              service_token_etudiants, service_token_notes, service_token_audit, service_token_notifications,
+              smtp_password]
+    depends_on:
+      auth-migration: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+
+  etudiants:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: etudiants } }
+    image: scolaris-etudiants
+    environment:
+      <<: *env
+      WEB_CONCURRENCY: "2"
+    secrets: [etudiant_db_url, jwt_public_key, rabbitmq_url, ca_cert, service_token_etudiants, service_token_notes]
+    depends_on:
+      etudiants-migration: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+
+  notes:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: notes } }
+    image: scolaris-notes
+    environment:
+      <<: *env
+      URL_ETUDIANTS: http://etudiants:8000
+      URL_PUBLIQUE: https://localhost:${PORT_HTTPS:-9443}   # adresse imprimée dans le QR code des relevés
+      WEB_CONCURRENCY: "4"   # service le plus sollicité en période de résultats (US27)
+    secrets: [notes_db_url, notes_db_url_ro, jwt_public_key, rabbitmq_url, ca_cert, service_token_notes]
+    depends_on:
+      notes-migration: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+
+  audit:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: audit } }
+    image: scolaris-audit
+    environment:
+      <<: *env
+      WEB_CONCURRENCY: "1"   # un seul processus : la vérification quotidienne de la chaîne ne s'exécute qu'une fois
+    secrets: [audit_db_url, jwt_public_key, rabbitmq_url, ca_cert, service_token_audit]
+    depends_on:
+      audit-migration: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+
+  notifications:
+    <<: *service
+    build: { context: ., dockerfile: services/Dockerfile, args: { SERVICE: notifications } }
+    image: scolaris-notifications
+    environment:
+      <<: *env
+      WEB_CONCURRENCY: "2"
+    secrets: [notifications_db_url, jwt_public_key, rabbitmq_url, ca_cert, service_token_notifications]
+    depends_on:
+      notifications-migration: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+
+  # --- Passerelle : seul conteneur publiant des ports ---
+  gateway:
+    build: { context: ., dockerfile: gateway/Dockerfile }
+    image: scolaris-gateway
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    secrets: [tls_cert, tls_key]
+    ports: ["127.0.0.1:${PORT_HTTPS:-9443}:8443", "127.0.0.1:${PORT_HTTP:-9080}:8080"]   # postes locaux uniquement en développement
+    networks: [dmz, interne]
+    depends_on: [auth, etudiants, notes, audit, notifications]
+
+networks:
+  dmz: {}
+  interne: { internal: true }
+  outils: {}
+
+volumes:
+  pgdata: {}
+  rabbitdata: {}
+
+secrets:
+  jwt_private_key: { file: ./secrets/jwt_private_key }
+  jwt_public_key: { file: ./secrets/jwt_public_key }
+  mfa_encryption_key: { file: ./secrets/mfa_encryption_key }
+  service_token_etudiants: { file: ./secrets/service_token_etudiants }
+  service_token_notes: { file: ./secrets/service_token_notes }
+  service_token_audit: { file: ./secrets/service_token_audit }
+  service_token_notifications: { file: ./secrets/service_token_notifications }
+  pg_postgres_admin_password: { file: ./secrets/pg_postgres_admin_password }
+  pg_migration_password: { file: ./secrets/pg_migration_password }
+  pg_svc_auth_password: { file: ./secrets/pg_svc_auth_password }
+  pg_svc_etudiant_password: { file: ./secrets/pg_svc_etudiant_password }
+  pg_svc_notes_rw_password: { file: ./secrets/pg_svc_notes_rw_password }
+  pg_svc_notes_ro_password: { file: ./secrets/pg_svc_notes_ro_password }
+  pg_svc_audit_password: { file: ./secrets/pg_svc_audit_password }
+  pg_svc_notifications_password: { file: ./secrets/pg_svc_notifications_password }
+  auth_db_url: { file: ./secrets/auth_db_url }
+  etudiant_db_url: { file: ./secrets/etudiant_db_url }
+  notes_db_url: { file: ./secrets/notes_db_url }
+  notes_db_url_ro: { file: ./secrets/notes_db_url_ro }
+  audit_db_url: { file: ./secrets/audit_db_url }
+  notifications_db_url: { file: ./secrets/notifications_db_url }
+  auth_db_url_migration: { file: ./secrets/auth_db_url_migration }
+  etudiant_db_url_migration: { file: ./secrets/etudiant_db_url_migration }
+  notes_db_url_migration: { file: ./secrets/notes_db_url_migration }
+  audit_db_url_migration: { file: ./secrets/audit_db_url_migration }
+  notifications_db_url_migration: { file: ./secrets/notifications_db_url_migration }
+  rabbitmq_password: { file: ./secrets/rabbitmq_password }
+  rabbitmq_url: { file: ./secrets/rabbitmq_url }
+  rabbitmq_tls_cert: { file: ./secrets/rabbitmq_tls_cert }
+  rabbitmq_tls_key: { file: ./secrets/rabbitmq_tls_key }
+  postgres_tls_cert: { file: ./secrets/postgres_tls_cert }
+  postgres_tls_key: { file: ./secrets/postgres_tls_key }
+  ca_cert: { file: ./secrets/ca_cert }
+  smtp_password: { file: ./secrets/smtp_password }
+  tls_cert: { file: ./secrets/tls_cert }
+  tls_key: { file: ./secrets/tls_key }

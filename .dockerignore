@@ -1,0 +1,13 @@
+.venv
+secrets
+**/__pycache__
+**/tests
+**/*.pyc
+**/node_modules
+**/dist
+.git
+mobile
+web/src/**/*.test.ts
+rapports
+sauvegardes
+*.zip

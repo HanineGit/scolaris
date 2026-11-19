@@ -1,0 +1,219 @@
+# Chaîne DevSecOps de Scolaris (section 2.5.10 du dossier de conception).
+#
+# Principe : à chaque modification envoyée sur le dépôt, une machine neuve
+# reconstruit le projet et le soumet à une série de contrôles de sécurité.
+# Une seule étape en échec bloque la suite : rien de vulnérable n'est livré.
+#
+#   1. secrets       : aucun mot de passe ni clé dans le code (gitleaks)
+#   2. sast          : analyse statique du code Python (Bandit, SonarQube)
+#   3. dependances   : vulnérabilités connues des bibliothèques (pip-audit, npm audit)
+#   4. tests         : tests unitaires et de sécurité, couverture >= 70 %
+#   5. images        : construction des conteneurs et analyse (Trivy)
+#   6. integration   : application démarrée, tests de bout en bout,
+#                      sauvegarde/restauration et analyse dynamique (OWASP ZAP)
+#   7. livraison     : publication des images après approbation manuelle
+name: DevSecOps
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Moindre privilège : le jeton du pipeline ne peut que lire le dépôt, sauf mention contraire.
+permissions:
+  contents: read
+
+concurrency:
+  group: devsecops-${{ github.ref }}
+  cancel-in-progress: true
+
+# Les outils sont figés à une version précise (jamais « latest ») : une image
+# modifiée en amont ne peut pas s'introduire sans changement visible ici.
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  secrets:
+    name: 1. Recherche de secrets (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }          # tout l'historique : un secret supprimé reste dans les anciens commits
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD:/depot" zricethezav/gitleaks:v8.21.2 \
+            detect --source /depot --config /depot/.gitleaks.toml --redact --verbose --exit-code 1
+
+  # ---------------------------------------------------------------------------
+  sast:
+    name: 2. Analyse statique (SAST)
+    runs-on: ubuntu-latest
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}" }
+      - name: Bandit (échec sur toute faiblesse de gravité moyenne ou élevée)
+        run: |
+          pip install bandit
+          bandit -r services/auth/app services/etudiants/app services/notes/app services/audit/app services/notifications/app \
+                 libs/common/scolaris_common scripts --severity-level medium -f txt
+      - name: SonarQube (si le serveur est configuré dans les secrets du dépôt)
+        if: ${{ env.SONAR_TOKEN != '' }}
+        uses: SonarSource/sonarqube-scan-action@v4
+
+  # ---------------------------------------------------------------------------
+  dependances:
+    name: 3. Audit des dépendances
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - name: pip-audit (bibliothèques Python des quatre services)
+        run: |
+          pip install pip-audit
+          for s in auth etudiants notes audit notifications; do
+            echo "== $s"; pip-audit -r services/$s/requirements.txt --strict
+          done
+      - name: npm audit (back-office web)
+        working-directory: web
+        run: npm ci --no-audit && npm audit --audit-level=low
+      - name: npm audit (application mobile, exceptions justifiées)
+        working-directory: mobile
+        # Les exceptions sont listées et justifiées dans mobile/audit-ci.json :
+        # elles concernent uniquement l'outillage de construction d'Expo, absent de l'application installée.
+        run: npm ci --no-audit && npx --yes audit-ci@7 --config audit-ci.json
+
+  # ---------------------------------------------------------------------------
+  tests:
+    name: 4. Tests (${{ matrix.cible }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cible: [auth, etudiants, notes, audit, notifications, web, mobile]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        if: ${{ matrix.cible != 'web' && matrix.cible != 'mobile' }}
+        with: { python-version: "${{ env.PYTHON_VERSION }}" }
+      - name: Tests et couverture du service ${{ matrix.cible }} (minimum 70 %)
+        if: ${{ matrix.cible != 'web' && matrix.cible != 'mobile' }}
+        run: |
+          pip install -r services/${{ matrix.cible }}/requirements.txt pytest pytest-cov httpx argon2-cffi pyotp -e libs/common
+          cd services/${{ matrix.cible }}
+          pytest --cov=app --cov-report=term --cov-fail-under=70
+      - uses: actions/setup-node@v4
+        if: ${{ matrix.cible == 'web' || matrix.cible == 'mobile' }}
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - name: Types et tests du back-office web
+        if: ${{ matrix.cible == 'web' }}
+        working-directory: web
+        run: npm ci --no-audit && npx tsc --noEmit && npx vitest run
+      - name: Types et tests de l'application mobile
+        if: ${{ matrix.cible == 'mobile' }}
+        working-directory: mobile
+        run: npm ci --no-audit && npx tsc --noEmit && npm test
+
+  # ---------------------------------------------------------------------------
+  images:
+    name: 5. Construction et analyse des images (Trivy)
+    needs: [secrets, sast, dependances, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construction des images
+        run: |
+          python3 -m pip install cryptography
+          python3 scripts/generer_secrets.py     # secrets jetables, propres à ce pipeline
+          docker compose build
+      - name: Analyse des images (vulnérabilités critiques et élevées corrigeables)
+        run: |
+          for image in $(docker compose config --images | grep '^scolaris'); do
+            echo "== $image"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.57.1 image \
+              --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 --no-progress "$image"
+          done
+
+  # ---------------------------------------------------------------------------
+  integration:
+    name: 6. Intégration, restauration et analyse dynamique (DAST)
+    needs: images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}" }
+      - name: Mot de passe de test aléatoire (jamais écrit dans le dépôt)
+        run: |
+          MDP="Sc-$(python -c 'import secrets; print(secrets.token_urlsafe(12))')9a!"
+          echo "::add-mask::$MDP"
+          echo "SCOLARIS_MDP_TEST=$MDP" >> "$GITHUB_ENV"
+      - name: Démarrage de l'application complète
+        run: |
+          pip install cryptography httpx pyotp playwright
+          python scripts/generer_secrets.py
+          docker compose up -d --build --wait
+      - name: Tests de bout en bout (API, à travers la passerelle HTTPS)
+        run: python scripts/test_bout_en_bout.py
+      - name: Moindre privilège et chiffrement en base
+        run: python scripts/verifier_privileges.py
+      - name: Mesures de performance (US01, US09, US27)
+        run: |
+          pip install -e libs/common
+          python scripts/test_performance.py
+      - name: Tests d'interface (navigateur)
+        env: { NAVIGATEUR: chromium }
+        run: |
+          python -m playwright install --with-deps chromium
+          docker compose down -v && docker compose up -d --wait
+          python scripts/test_interface.py rapports/captures
+      - name: Sauvegarde chiffrée puis restauration (critère US27)
+        run: |
+          python scripts/sauvegarde.py sauvegarder
+          python scripts/sauvegarde.py restaurer "$(ls -d sauvegardes/* | tail -1)"
+      - name: Résistance du bus d'audit (US24, arrêt de RabbitMQ pendant 10 minutes)
+        run: python scripts/test_resilience_bus.py 600
+      - name: Analyse dynamique OWASP ZAP (base)
+        run: |
+          mkdir -p rapports && chmod 777 rapports
+          docker run --rm --network host -v "$PWD/rapports:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:2.15.0 \
+            zap-baseline.py -t https://localhost:9443 -c regles-zap.conf -r zap.html -J zap.json -I
+          python scripts/verifier_zap.py rapports/zap.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: rapports-securite, path: rapports/ }
+      - name: Arrêt
+        if: always()
+        run: docker compose down -v
+
+  # ---------------------------------------------------------------------------
+  livraison:
+    name: 7. Livraison (approbation manuelle)
+    needs: integration
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # L'environnement « production » est protégé dans GitHub : un responsable doit approuver.
+    environment: production
+    permissions:
+      contents: read
+      packages: write      # seule cette étape peut publier les images
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publication des images dans le registre GitHub
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          python3 -m pip install cryptography && python3 scripts/generer_secrets.py
+          docker compose build
+          for image in $(docker compose config --images | grep '^scolaris'); do
+            cible="ghcr.io/${{ github.repository_owner }}/${image}:${{ github.sha }}"
+            docker tag "$image" "$cible" && docker push "$cible"
+          done
