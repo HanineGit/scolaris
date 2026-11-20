@@ -40,7 +40,7 @@ jobs:
     name: 1. Recherche de secrets (gitleaks)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with: { fetch-depth: 0 }          # tout l'historique : un secret supprimé reste dans les anciens commits
       - name: gitleaks
         run: |
@@ -55,8 +55,8 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: { python-version: "${{ env.PYTHON_VERSION }}" }
       - name: Bandit (échec sur toute faiblesse de gravité moyenne ou élevée)
         run: |
@@ -72,10 +72,10 @@ jobs:
     name: 3. Audit des dépendances
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: { python-version: "${{ env.PYTHON_VERSION }}" }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with: { node-version: "${{ env.NODE_VERSION }}" }
       - name: pip-audit (bibliothèques Python des quatre services)
         run: |
@@ -101,8 +101,8 @@ jobs:
       matrix:
         cible: [auth, etudiants, notes, audit, notifications, web, mobile]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         if: ${{ matrix.cible != 'web' && matrix.cible != 'mobile' }}
         with: { python-version: "${{ env.PYTHON_VERSION }}" }
       - name: Tests et couverture du service ${{ matrix.cible }} (minimum 70 %)
@@ -111,7 +111,7 @@ jobs:
           pip install -r services/${{ matrix.cible }}/requirements.txt pytest pytest-cov httpx argon2-cffi pyotp -e libs/common
           cd services/${{ matrix.cible }}
           pytest --cov=app --cov-report=term --cov-fail-under=70
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         if: ${{ matrix.cible == 'web' || matrix.cible == 'mobile' }}
         with: { node-version: "${{ env.NODE_VERSION }}" }
       - name: Types et tests du back-office web
@@ -129,19 +129,40 @@ jobs:
     needs: [secrets, sast, dependances, tests]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Construction des images
         run: |
           python3 -m pip install cryptography
           python3 scripts/generer_secrets.py     # secrets jetables, propres à ce pipeline
           docker compose build
       - name: Analyse des images (vulnérabilités critiques et élevées corrigeables)
+        # Toutes les images sont analysées avant de conclure ; le rapport complet est publié en artefact.
         run: |
-          for image in $(docker compose config --images | grep '^scolaris'); do
-            echo "== $image"
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.57.1 image \
-              --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 --no-progress "$image"
+          mkdir -p rapports
+          echec=0
+          for image in $(docker compose config --images | grep '^scolaris' | sort -u); do
+            echo "== $image" | tee -a rapports/trivy.txt
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/rapports:/rapports" aquasec/trivy:0.57.1 image \
+              --severity CRITICAL,HIGH --ignore-unfixed --no-progress --format json -o "/rapports/$image.json" "$image"
+            # Résumé lisible et annotation par image vulnérable (paquet, CVE, version corrigée).
+            python3 - "$image" "rapports/$image.json" <<'EOF' | tee -a rapports/trivy.txt || echec=1
+          import json, sys
+          image, chemin = sys.argv[1], sys.argv[2]
+          vulns = [(r.get("Target", ""), v["PkgName"], v["VulnerabilityID"], v["Severity"], v.get("InstalledVersion"), v.get("FixedVersion"))
+                   for r in json.load(open(chemin)).get("Results", []) for v in r.get("Vulnerabilities") or []]
+          for v in vulns:
+              print(" | ".join(str(x) for x in v))
+          if vulns:
+              paquets = sorted({f"{p} {i}->{f}" for _, p, _, _, i, f in vulns})
+              print(f"::error title=Trivy {image}::{len(vulns)} vulnérabilité(s) corrigeable(s) : " + ", ".join(paquets)[:900])
+              sys.exit(1)
+          print("aucune vulnérabilité élevée ou critique corrigeable")
+          EOF
           done
+          exit $echec
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with: { name: rapport-trivy, path: rapports/trivy.txt }
 
   # ---------------------------------------------------------------------------
   integration:
@@ -149,8 +170,8 @@ jobs:
     needs: images
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: { python-version: "${{ env.PYTHON_VERSION }}" }
       - name: Mot de passe de test aléatoire (jamais écrit dans le dépôt)
         run: |
@@ -188,7 +209,7 @@ jobs:
           docker run --rm --network host -v "$PWD/rapports:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:2.15.0 \
             zap-baseline.py -t https://localhost:9443 -c regles-zap.conf -r zap.html -J zap.json -I
           python scripts/verifier_zap.py rapports/zap.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with: { name: rapports-securite, path: rapports/ }
       - name: Arrêt
@@ -207,7 +228,7 @@ jobs:
       contents: read
       packages: write      # seule cette étape peut publier les images
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Publication des images dans le registre GitHub
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
