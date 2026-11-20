@@ -247,7 +247,8 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           python3 -m pip install cryptography && python3 scripts/generer_secrets.py
           docker compose build
-          for image in $(docker compose config --images | grep '^scolaris'); do
-            cible="ghcr.io/${{ github.repository_owner }}/${image}:${{ github.sha }}"
+          proprietaire="${GITHUB_REPOSITORY_OWNER,,}"   # le registre exige des noms en minuscules
+          for image in $(docker compose config --images | grep '^scolaris' | sort -u); do
+            cible="ghcr.io/${proprietaire}/${image}:${{ github.sha }}"
             docker tag "$image" "$cible" && docker push "$cible"
           done
