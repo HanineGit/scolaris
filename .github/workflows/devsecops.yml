@@ -218,6 +218,7 @@ jobs:
       - name: Analyse dynamique OWASP ZAP (base)
         run: |
           mkdir -p rapports && chmod 777 rapports
+          cp regles-zap.conf rapports/   # ZAP ne voit que son dossier de travail (/zap/wrk)
           docker run --rm --network host -v "$PWD/rapports:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:2.15.0 \
             zap-baseline.py -t https://localhost:9443 -c regles-zap.conf -r zap.html -J zap.json -I
           python scripts/verifier_zap.py rapports/zap.json
