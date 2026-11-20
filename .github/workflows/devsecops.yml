@@ -138,6 +138,7 @@ jobs:
       - name: Analyse des images (vulnérabilités critiques et élevées corrigeables)
         # Toutes les images sont analysées avant de conclure ; le rapport complet est publié en artefact.
         run: |
+          set -o pipefail   # sans cela, l'échec de l'analyse serait masqué par « tee »
           mkdir -p rapports
           echec=0
           for image in $(docker compose config --images | grep '^scolaris' | sort -u); do

@@ -6,6 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Correctifs de sécurité du système de base appliqués à chaque construction (contrôlés par Trivy).
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
+
 # Compte système sans privilèges : le service ne tourne jamais en root.
 RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin scolaris
 
