@@ -102,7 +102,9 @@ with sync_playwright() as p:
     print("1. Administrateur : activation et connexion à deux facteurs")
     secret_admin = activer(page, "admin@univ-exemple.cm", "A1_activation_personnel")
     connecter(page, "admin@univ-exemple.cm", secret_admin, captures=True)
-    expect(page).to_have_url(re.compile("/admin/etudiants"))
+    expect(page).to_have_url(re.compile(r"/admin$"))
+    expect(page.get_by_role("heading", name="Tableau de bord")).to_be_visible()
+    capture(page, "W00_tableau_de_bord")
 
     print("2. Création d'un enseignant (W11)")
     page.get_by_role("link", name="Comptes du personnel").click()
@@ -118,7 +120,7 @@ with sync_playwright() as p:
     capture(page, "W11_comptes")
 
     print("3. Création d'une matière (W10)")
-    page.get_by_role("link", name="Matières et affectations").click()
+    page.get_by_role("link", name="Matières et publication").click()
     page.get_by_role("button", name="Nouvelle matière").click()
     code_matiere = f"INF{suffixe[:3].upper()}"
     page.get_by_label("Code").fill(code_matiere)
@@ -154,7 +156,7 @@ with sync_playwright() as p:
 
     print("6. Affectation de l'enseignant à la matière (W10)")
     connecter(page, "admin@univ-exemple.cm", secret_admin)
-    page.get_by_role("link", name="Matières et affectations").click()
+    page.get_by_role("link", name="Matières et publication").click()
     page.get_by_role("row", name=re.compile(code_matiere)).click()
     page.get_by_label("Enseignant").select_option(label="ABENA Jean")
     page.get_by_role("button", name="Affecter").click()
@@ -166,7 +168,7 @@ with sync_playwright() as p:
     connecter(page, email_prof, secret_prof)
     expect(page.get_by_text(code_matiere)).to_be_visible()
     capture(page, "W03_mes_matieres")
-    page.get_by_role("link", name="Saisie des notes").click()
+    page.get_by_role("link", name="Saisie individuelle").click()
     page.get_by_label("Étudiant (matricule)").fill(matricule)
     page.get_by_role("button", name="Rechercher").click()
     expect(page.get_by_text("DIALLO Aminata")).to_be_visible()
@@ -191,6 +193,7 @@ with sync_playwright() as p:
 
     print("8. Administrateur : fiche étudiant et journal d'audit (W9, W12)")
     connecter(page, "admin@univ-exemple.cm", secret_admin)
+    page.get_by_role("link", name="Étudiants", exact=True).click()
     page.get_by_role("row", name=re.compile(matricule)).click()
     expect(page.get_by_text("(modifiée)")).to_be_visible()
     page.get_by_role("button", name="Archiver").click()
@@ -208,6 +211,15 @@ with sync_playwright() as p:
     page.get_by_role("row", name=re.compile("NOTE_MODIFIEE")).first.click()
     expect(page.get_by_text("Détail de l'événement")).to_be_visible()
     capture(page, "W12_audit")
+
+    print("9. Écrans de pilotage (W13 à W15, W18)")
+    for lien_menu, titre, nom in (("Classes et inscriptions", "Classes et inscriptions", "W13_classes"),
+                                  ("Calendrier et saisie", "Calendrier et saisie", "W14_calendrier"),
+                                  ("Délibération", "Délibération", "W15_deliberation"),
+                                  ("Sécurité du compte", "Sécurité du compte", "W18_securite")):
+        page.get_by_role("link", name=lien_menu, exact=True).click()
+        expect(page.get_by_role("heading", name=titre, exact=True)).to_be_visible()
+        capture(page, nom)
 
     navigateur.close()
     if erreurs_console:
