@@ -60,6 +60,9 @@ def p95(valeurs: list[float]) -> float:
 
 def verifier(condition: bool, message: str):
     print(f"  {'ok ' if condition else 'ÉCHEC'}  {message}")
+    if os.environ.get("GITHUB_ACTIONS"):
+        # Chaque mesure apparaît en annotation sur la page de l'exécution.
+        print(f"::{'notice' if condition else 'warning'} title=Performance::{message}")
     if not condition:
         echecs.append(message)
 
