@@ -59,8 +59,11 @@ services:
       - ./infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     networks: [interne]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      # En TCP : pendant l'initialisation, le serveur temporaire n'écoute que sur le socket local ;
+      # le service n'est donc déclaré prêt qu'une fois le serveur définitif démarré.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres"]
       interval: 5s
+      start_period: 60s
       retries: 20
 
   rabbitmq:
@@ -94,6 +97,7 @@ services:
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_listener", "5671"]
       interval: 10s
+      start_period: 30s
       retries: 20
 
   mailpit:
