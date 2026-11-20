@@ -183,7 +183,18 @@ jobs:
         run: |
           pip install cryptography httpx pyotp playwright
           python scripts/generer_secrets.py
-          docker compose up -d --build --wait
+          # Les secrets Compose gardent les droits du fichier hôte (600, utilisateur du runner) :
+          # sur cette machine éphémère et mono-utilisateur, on les rend lisibles par les comptes
+          # des conteneurs (postgres, UID 10001). En production, l'orchestrateur attribue
+          # propriétaire et mode à chaque secret.
+          chmod 644 secrets/*
+          if ! docker compose up -d --build --wait; then
+            docker compose ps -a
+            for s in $(docker compose ps -a --format '{{.Service}} {{.State}} {{.Health}}' | awk '$2!="running" || $3=="unhealthy" {print $1}'); do
+              echo "::error title=Démarrage de $s::$(docker compose logs --no-log-prefix --tail 15 "$s" 2>&1 | tr '\n' ' ' | cut -c1-900)"
+            done
+            exit 1
+          fi
       - name: Tests de bout en bout (API, à travers la passerelle HTTPS)
         run: python scripts/test_bout_en_bout.py
       - name: Moindre privilège et chiffrement en base
