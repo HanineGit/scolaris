@@ -105,7 +105,7 @@ def publier(matiere_id: uuid.UUID, request: Request, principal: Principal = Depe
     tracer(session, request, "NOTES_PUBLIEES", "SUCCES", acteur=principal, ressource="matiere", ressource_id=m.id,
            details={"matiere": m.code, "notes": nombre})
     notifier(session, categorie="NOTES", titre="Nouvelles notes disponibles",
-             message=f"Les notes de {m.libelle} sont publiées.", lien="/notes",
+             message=f"Les notes de la matière « {m.libelle} » sont publiées.", lien="/notes",
              etudiants=_etudiants_de_la_matiere(request, session, m))
     session.commit()
     return {"id": str(m.id), "publiee_le": m.publiee_le.isoformat(), "notes": nombre}

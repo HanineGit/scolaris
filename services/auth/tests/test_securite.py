@@ -106,3 +106,11 @@ def test_indicateurs_de_securite_reserves_a_l_administrateur(env):
     i = env.client.get("/api/v1/admin/securite", headers=admin).json()
     assert i["connexions_24h"] == 2 and i["echecs_24h"] == 1 and i["comptes_actifs_par_role"]["ETUDIANT"] == 1
     assert env.client.get("/api/v1/admin/securite", headers=web).status_code == 403
+
+
+def test_description_des_appareils_sans_chaine_brute():
+    from app.services import decrire_appareil
+    assert decrire_appareil("okhttp/4.12.0") == "Application Scolaris sous Android"
+    assert decrire_appareil("Scolaris/1 CFNetwork/1498 Darwin/24.0.0") == "Application Scolaris sous iOS"
+    assert decrire_appareil(EDGE["User-Agent"]) == "Edge sous Windows"
+    assert decrire_appareil(None) == "Navigateur sous système inconnu"

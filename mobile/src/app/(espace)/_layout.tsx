@@ -1,5 +1,6 @@
 import { Redirect, Stack } from "expo-router";
-import { usePreventScreenCapture } from "expo-screen-capture";
+import { allowScreenCaptureAsync, preventScreenCaptureAsync } from "expo-screen-capture";
+import { useEffect } from "react";
 import { View } from "react-native";
 
 import { FournisseurNotifications } from "../../lib/notifications";
@@ -16,7 +17,12 @@ import { useCouleurs } from "../../ui/theme";
 export default function Espace() {
   const { utilisateur, pret, signalerActivite } = useSession();
   const c = useCouleurs();
-  usePreventScreenCapture("notes");
+  useEffect(() => {
+    // Appels explicites : la levée du blocage peut échouer si Android a déjà détruit l'écran
+    // (application passée en arrière-plan) ; l'erreur est alors sans conséquence.
+    preventScreenCaptureAsync("notes").catch(() => undefined);
+    return () => { allowScreenCaptureAsync("notes").catch(() => undefined); };
+  }, []);
   if (!pret) return <View style={{ flex: 1, backgroundColor: c.bg }} />;
   if (!utilisateur) return <Redirect href="/connexion" />;
   return (

@@ -83,6 +83,9 @@ def decrire_appareil(user_agent: str | None) -> str:
     ua = user_agent or ""
     systeme = next((nom for motif, nom in SYSTEMES if motif in ua), "système inconnu")
     if "okhttp" in ua or "Expo" in ua or "Scolaris" in ua or "CFNetwork" in ua:
+        # Le client HTTP natif s'annonce seul (« okhttp/4.12.0 ») : il suffit à déduire le système.
+        if systeme == "système inconnu":
+            systeme = "Android" if "okhttp" in ua else "iOS" if ("CFNetwork" in ua or "Darwin" in ua) else systeme
         return f"Application Scolaris sous {systeme}"
     navigateur = next((nom for motif, nom in NAVIGATEURS if motif in ua), "Navigateur")
     return f"{navigateur} sous {systeme}"[:80]
