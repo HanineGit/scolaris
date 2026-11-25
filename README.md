@@ -44,6 +44,16 @@ cd services/notes && ../../.venv/Scripts/python -m pytest
 cd ../.. && .venv/Scripts/bandit -r services/*/app libs/common/scolaris_common
 ```
 
+## Administrateur ayant perdu ses identifiants
+
+Procédure de secours réservée à l'exploitant du serveur : le compte repasse en attente
+d'activation, ses sessions sont révoquées et un nouveau lien d'activation part par e-mail
+(événement `COMPTE_RECUPERE` tracé en alerte dans le journal d'audit).
+
+```bash
+docker compose exec auth python -m app.recuperer admin@univ-exemple.cm
+```
+
 ## Pile de démonstration et d'essai (séparée de la pile principale)
 
 Une seconde pile, avec ses propres bases et d'autres ports, sert aux tests de bout en bout

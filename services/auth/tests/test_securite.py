@@ -114,3 +114,25 @@ def test_description_des_appareils_sans_chaine_brute():
     assert decrire_appareil("Scolaris/1 CFNetwork/1498 Darwin/24.0.0") == "Application Scolaris sous iOS"
     assert decrire_appareil(EDGE["User-Agent"]) == "Edge sous Windows"
     assert decrire_appareil(None) == "Navigateur sous système inconnu"
+
+
+def test_procedure_de_secours_d_un_administrateur(env, monkeypatch):
+    """Mot de passe et second facteur perdus : nouveau lien, sessions révoquées, alerte d'audit."""
+    from app import recuperer
+    secret = creer_admin(env)
+    admin = connecter_admin(env, secret)
+    monkeypatch.setattr(recuperer, "ExpediteurSmtp", lambda: env.expediteur)
+    assert recuperer.main("ADMIN@univ-exemple.cm", initialiser=False) == 0
+    assert env.expediteur.envoyes[-1]["a"] == "admin@univ-exemple.cm"
+    assert "COMPTE_RECUPERE" in evenements(env)
+    from app.models import JetonRafraichissement, Revocation, Utilisateur
+    with env.db.fabrique()() as s:
+        u = s.query(Utilisateur).filter_by(email="admin@univ-exemple.cm").one()
+        assert u.statut == "EN_ATTENTE_ACTIVATION" and u.secret_mfa_chiffre is None
+        assert s.query(Revocation).filter_by(utilisateur_id=u.id).count() == 1  # jetons d'accès déjà émis révoqués
+        assert all(j.revoque for j in s.query(JetonRafraichissement).filter_by(utilisateur_id=u.id))
+    assert admin  # session ouverte avant la procédure
+    assert env.client.post("/api/v1/auth/connexion", json={"identifiant": "admin@univ-exemple.cm",
+                                                           "mot_de_passe": MDP}).status_code == 401
+    activer_etudiant(env)
+    assert recuperer.main("a.diallo@etu.univ-exemple.cm", initialiser=False) == 1  # jamais pour un compte étudiant
